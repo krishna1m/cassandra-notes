@@ -1,0 +1,749 @@
+#+TITLE: Readme
+
+* 101
+** Lecture 1: Relational Overview
+With small data, you use awk or sed and run it in your laptop.
+With medium data, data that fits on a single machine, we might MySQL or PostgreSQL or any other relational database.
+Medium data -
+1. Fits on 1 machine
+2. RDBMS is fine
+3. Supports hundreds of concurrent users
+4. ACID makes us feel good - Atomicity, Consistency, Isolation and Durability.
+5. Scales vertically - more expensive hardware, memory,etc
+
+Can RDBMS work for big data?
+Replication: ACID is a lie.
+Let's say we have a MySQL database and our client is talking to that MySQL master node.
+We have a read heavy workload and we decide to add on Replication.
+Data replication is asynchronous and this is called as "Replication lag".
+When the client decides to write to the master, it takes a while to propagate to the slave MySQL node.
+By that time, if the client decides to do a read to the slave, it is going to get old data back.
+Our consistency is lost completely.
+All operations that we do are not in isolation and are completely not atomic.
+We need to build apps to accomodate the fact that we have replication and there is replication lag.
+
+Complex queries can lock the database causing lots of problems.
+The "third normal form" doesn't scale.
+1. Queries are unpredictable
+2. Users are impatient
+3. Data must be denormalized
+4. If data>memory, you=history
+5. Disk seeks are the worst
+
+To deal with such unpredictable queries, we denomalize. Denormalization-
+We build a table and that table is built specificly to answer some complex query.
+At write time, we denomalize the data so that at the read time, we can do a "SELECT *" or a simple query that doesn't have a lot of joins in it.
+That means, we have duplicate copies of data and we have violated "The Third normal form".
+
+Sharding is a Nightmare -
+Sharding is when you take your data and instead of having an all-in-one database and one master, you split it up into multiple databases.
+
+1. Data is all over the place.
+2. No more joins
+3. No more aggregations
+4. Denormalize all the things
+5. Querying secondary indexes requires hitting every shard
+6. Adding shards requires manually moving data
+7. Schema changes
+
+People might talk of the master-slave architecture to have High Availability.
+Problems with that are-
+1. With replication, there is a decision needed to be made about how to do "failover", which could be automatic or manual to notice that the database has gone down and to push a button to failover to the slave server. Even if it is an automatic process, what is going to make sure that that process doesn't crash?! The problem is that something has got to detect that the database has gone down and that will cause downtime everytime.
+2. Multi-DC(data center) with RDBMS is a mess
+3. Downtime is frequent
+   a. Change database settings(innodb buffer pool,etc )
+   b. Drive, power supply failures
+   c. OS updates
+
+Summary of Failure -
+1. Scaling is a pain
+2. ACID is naive at best - You're not consistent
+3. Re-sharding is a manual process
+4. We're going to denormalize for performance
+5. High availability is complicated with RDBMS on multi-DC, requires additional operational overhead
+
+
+Lessons learned -
+1. Consistency is not practical, so we give it up
+2. Manual sharding & rebalancing is hard, so let's build it into our DB cluster
+3. Every moving part makes systems more complex, we simply our architecture, no more master/slave
+4. Scaling up is expensive, we want commodity hardware instead
+5. Scatter/gather no good
+   a. We denormalize for real time query performance
+   b. Goal is to always hit 1 machine - Data locality
+
+** Lecture 2: Cassandra Overview
+Cassandra is a fast distributed database built for high availability and linear scalability.
+1. Fast distributed database
+2. High Availability
+3. Linear scalability
+4. Predictable performance
+5. No SPOF(single point of failure) - p2p architecture(no master/slave)
+6. Multi-DC
+7. Commodity hardware
+8. Easy to manage operationally
+9. Not a drop in replacement for RDBMS(will need to design your application around Cassandra's data modelling rules)
+
+Hash Ring
+1. No master/slave/replica sets
+2. No config servers, zookeeper
+3. Data is partitioned around the ring
+4. Data is replicated to RF=N servers
+5. All nodes hold data and can answers queries(both reads & writes)
+6. Location of data on ring is determined by partition key
+
+Every node is equal and each node owns a range of hashes like a bucket of hashes.
+When you create a data model in Cassandra, when you create a table, one of the things you specify is a primary key and part of the primary key is a partition key and the partition key is what is used actually used when you insert data into cassandra.
+The value of that partition key is run through a consistent hashing function and depending on the output, we can figure out which bucket or which range of hashes that value fits into and thus which node we need to talk to actually distribute the data around the cluster.
+
+Data is replicated to multiple servers and all of the servers are equal.
+Any node on the cluster can service any given read or write request for the cluster.
+
+CAP Theorem
+CAP theorem says that during a network partition, which means when computers can't talk to each other, either between data centers or on a single network, that you can either choose consistency (meh..) or high availability.
+
+CAP Tradeoffs
+1. Impossible to have both consistent and high available during a network partition
+2. Latency between data centers also makes consistency impractical. We want to asynchronously replicate our data from one DC to another because it takes way too long for data to travel.
+3. Cassandra chooses availability & partition tolerance over consistency. Cassandra chooses to be highly available in a network partition as opposed to being down and a lot of applications, and for a lot of applications, this is way better than downtime.
+
+*** Dials that Cassandra offers for fault tolerance-
+1. Cassandra allows dials to go either end of the CAP Theorem or anywhere in between.
+
+**** First dial: Replication(how many copies of each piece of data should there be in your cluster)
+1. Data is replicated automatically
+2. You pick number of servers
+3. Called "replication factor" or RF(you set this RF when you configure a keyspace, which in cassandra is essentially a collection of tables)
+4. Data is ALWAYS replicated to each replica
+5. If a machine is down, missing data is replayed via hinted handoff
+   If a machine is down while replication is supposed to happen, whatever node you happen to be talking to is going to save what's called a hint and Cassandra uses something called hinted handoffs to be able to replayed when the node comes back up and rejoins the cluster, to be able to replay all the writes that the node missed while it was down
+
+**** Second dial: Consistency level(we get to set this on any given read/write request that is done from your application talking to Cassandra)
+A consistency level means how many replicas do I need to hear when I do a read or a write before that read or that write is considered successful
+So, if doing a read, how many replicas do I need to hear from before Cassandra gives the data back to the client.
+If doing a write, how many replicas need to say that we got your data
+1. Per query consistency
+2. ALL, QUORUM - a majority of replicas(51% or greater, for RF=3, QUORUM means 2), ONE - means one replica
+3. How many replicas for query to respond OK
+
+A lower consistency level means faster reads/writes whereas a higher one, I have to hear from more nodes where more nodes have to be online to be able to acknowledge reads and writes, which means I am going to be less available and less tolerant towards nodes going down.
+
+Multi DC
+1. Typical usage: clients write to local DC, replicates async to other DCs
+   If we are doing local DC, we would say local ONE or local QUORUM for the consistency level.
+2. Replication factor per keyspace per data center
+3. Data centers can be physical or logical
+   When using cassandra with spark, you may want to have one data center which is your OLTP, using which you are serving fast reads to your application, and then one data center virtually, that's serving your OLAP queries.
+   Doing that, we can make sure that our OLAP queries don't impact your OLTP stuff
+** Lecture 3: Cassandra internals and choosing a distribution
+*** The write path
+1. Writes are written to any node in the cluster(coordinator, because it's going to be doing the coordination with the rest of the nodes in the cluster in behalf of your query)
+2. Writes are written to commit log, then to memtable
+   Commit log is an append-only data structure
+   The in-memory representation of your table is called memtable
+3. Every write includes a timestamp
+   Every column value that is written gets a timestamp
+4. Memtable flushed to disk periodically(sstable)
+   Since memory is finite, in-memory memtable is taken and is serialized onto the disk, called an sstable.
+   Updates and deletes never happen in-place in cassandra.
+5. New memtable is created in memory
+6. Deletes are a special write case, called a "tombstone"
+   SStables are immutable, commit log is immutable, so when deletes are done, cassandra creates a special kind of record called a "tombstone" which is just a marker which basically says there's no data here anymore as of this timestamp because tombstones also get timestamp like regular data. What it means is there's no data here for this column anymore.
+
+**** What is an SSTable?
+1. Immutable data file for row storage on disk
+2. Every write includes a timestamp of when it was written
+3. Partition is spread across multiple SSTables
+4. Same column can be in multiple SSTables
+5. Merged through compaction, only latest timestamp is kept
+   As we write sstables to disk, as an optimization, compaction takes small sstables and merges them into bigger ones.
+   So, if we had written a row 1 at a certain timestamp and a row 2 at a certain timestamp, during compaction, we are going to take the row 2 based on the timestamp that is included with the data and we are going to disregard the old one.
+   This is what keeps Cassandra working fast and this is how we avoid having to check many sstables to find the same piece of data.
+6. Deletes are written through tombstones
+7. Easy backups
+   Whenever sstables are written to disk, you can copy it off to another server and you are good to go.
+
+*** The read path
+Reads are very similar to writes, they are "coordinated" just like before.
+1. Any server may be queried, it acts as the coordinator
+2. Contacts nodes with the requested key
+3. On each node, data is pulled from SSTables and merged
+   For reads, Cassandra is going to go to the disk and it is going to try and find the data requested for.
+   It might have to look in multiple sstables, but you might have some rows spread across multiple tables where compaction hasn't had a chance to run and combine them together yet.
+   That data is then pulled up into memory, merged together using the timestamp where the last write wins and if there's any unflushed data in the memtables, that gets merged in as well and then we can actually send a response back to the client or the coordinator and give them the data.
+   Because we are reading from multiple sstables on disk, if you have a read-heavy workload in Cassandra, the choice of disk(SSD, rust type drives) will have a serious impact on what kind of performance you get out of Cassandra.
+   Compaction is also going to have an impact on how quickly we can read data off disk in a read-heavy workload.
+   If compaction is running and there are fewer files for Cassandra to have to search for a given key on disk, then it's going to be much faster because it has to do less disk IO which is a good thing for reading data in any DB.
+4. Consistency < ALL performs read repair in the background(read_repair_chance).
+   Cassandra is an eventually consistent system and so from time to time, nodes may disagree about the value of a given piece of data. One node may not have heard the latest piece of data and so there's a configuration when you create a table in Cassandra called read repair chance and this is basically the chance when you do a read against Cassandra that it's going to actually go and try to talk to all the other replicas in the cluster and make sure that everybody sort of has the most up-to-date and most in-sync information.
+   The default setting for this is 10%.
+   So, for 10% of all the reads, Cassandra is going to do this on your behalf to keep your data in sync.
+
+   Datastax Enterprise
+   1. Integrated Multi-DC search
+   2. Integrated Spark for analysis
+   3. Free Startup Program
+   4. Extended support
+   5. Additional QA
+   6. Focused on stable releases for enterprise
+   7. Included on USB
+* 201
+** Lecture 2: Quick Wins
+There are two options when choosing a cassandra distribution:
+1. Datastax enterprise
+2. Apache Cassandra opensource
+
+Installation has these main directories -
+bin, conf, doc, tools
+
+*** Starting Apache Cassandra -
+bin/cassandra
+
+State jump to normal means the cassandra DB is ready to service requests.
+Once you see the message, press enter to get back to the command prompt.
+
+*** Starting Datastax Enterprise -
+./dse cassandra -> had to use the root user to run this, use the -R flag to do so
+./dse cassandra-stop -> to stop
+
+./dsetool status -> to check status
+
+State jump to normal means the cassandra DB is ready to service requests.
+Once you see the message, press enter to get back to the command prompt.
+
+*** nodetool
+Used to get information about
+1. state of your cluster
+2. state of each node in your cluster, whether it's up, down, leaving or joining alongwith other statuses
+3. node address, load
+4. what datacenter your node occupies
+
+*** CQL Fundamentals
+CQL is a simple data manipulation and query language built to give a familiar environment to those knowing SQL
+
+**** Keyspaces
+1. Very similar to relational database schemas
+2. Top level namespace/container, acts as a wrapper around database objects
+3. When creating a keyspace, we must also set its replication parameters
+
+   create keyspace killrvideo
+   with replication = {
+    'class': 'SimpleStrategy',
+    'replication_factor': 1
+   };
+
+   Where to place next replica is determined by the Replication Strategy. While the total number of replicas placed on different nodes is determined by the Replication Factor.
+
+   describe keyspaces;
+   OR
+   desc keyspaces;
+
+**** Use
+Use switches between keyspaces
+
+use killrvideo;
+
+Allows you to do stuff in a keyspace without specifying the keyspace with each command.
+
+**** Tables
+Keyspaces contain tables.
+Tables contain data.
+
+    create table table1 (
+        column1 text,
+        column2 text,
+        column3 int,
+        primary key (column1)
+    );
+
+    create table users (
+        user_id uuid,
+        first_name text,
+        last_name text,
+        primary key (user_id)
+    );
+
+
+   describe tables;
+   OR
+   desc tables;
+
+   desc table users;
+
+
+**** Data types
+cassandra TEXT datatype is unbounded.
+
+**** UUID and TIMEUUID
+Insert commands can arrive at any node in the distributed cassandra cluster, sinking or locking an incremental integer ID value-approved prohibitive, so we identify records using UUIDs instead.
+
+UUID - Universally Unique Identifier
+UUIDs enable several nodes to generate non clashing ID values without any inter node communication.
+This is the distributed-databases way to ensure your UUIDs are unique no matter which node generates your ID.
+Generate via `uuid()`
+
+A TIMEUUID is a UUID with an embedded timestamp value which can be used to produce time ordered data and your can use CQL's `dateof` function to extract the time portion of an existing time UUID.
+Generate via `now()`
+Insert commands can arrive at any node in the distributed cassandra cluster, sinking or locking an incremental integer ID value-approved prohibitive, so we identify records using UUIDs instead.
+
+UUID - Universally Unique Identifier
+UUIDs enable several nodes to generate non clashing ID values without any inter node communication.
+This is the distributed-databases way to ensure your UUIDs are unique no matter which node generates your ID.
+Generate via `uuid()`
+
+A TIMEUUID is a UUID with an embedded timestamp value which can be used to produce time ordered data and your can use CQL's `dateof` function to extract the time portion of an existing time UUID.
+Generate via `now()`
+
+**** INSERT
+Similar to relational syntax
+
+insert into users (user_id, first_name, last_name)
+values (uuid(), 'Joseph', 'Tzu');
+
+**** SELECT
+Similar to relational syntax
+
+select *
+from users;
+
+select first_name, last_name
+from users;
+
+select *
+from users
+where user_id = 4bkjshdf-kjshfs-slfkjhfjhd;
+
+**** COPY
+1. imports/exports CSV
+
+   copy table1 (column1, column2, column3)
+   from 'table1data.csv';
+
+2. Header parameter skips the first line in the file
+
+   copy table1 (column1, column2, column3)
+   from 'table1data.csv'
+   with header=true;
+
+Apart from the COPY command, we can get data into CDB using -
+1. Apache spark
+2. Application drivers
+3. Bulk loader for large datasets
+
+**** Exercise
+create table videos (
+    video_id timeuuid,
+    added_date timestamp,
+    Title text
+    primary key (video_id)
+);
+
+insert into videos (video_id, added_date, title) values (now(), '2014-01-29', 'cassandra history');
+
+** Lecture 3: Partitions
+With the Cassandra data model, we are optimizing for the application.
+We can have another column to group data, example, a country field.
+So, each partition created will have a unique country.
+
+Our application needs to have the "country" as the logical grouping of data.
+
+The partition key is how the data is placed on the ring.
+So, the choices made in the data model can make a huge difference in the efficiency of how you query data.
+
+So when inserting a record, that data is partitioned using a hashing algorithm based on the partitioner and it turns that partition key into a hash number called a partition token and that token is used to later place the data correctly on the ring.
+
+So, in the case where we have multiple partitions, we have to make sure that we make the primary key the "country" column.
+The first value in a primary key is always the partition key.
+Usually, this is not unique enough so we need to add one more column to the primary key to make sure we're not overriding records.
+
+For example, if we have some ID, we can use that in our data model to make it unique, that is what we call a clustering column.
+PRIMARY KEY((state), id)
+
+
+Execute the following query to view the partitioner token value for each video id.
+SELECT token(video_id), video_id
+FROM videos;
+
+create table videos_by_tag (
+              ...   tag text,
+              ...   video_id uuid,
+              ...   added_date timestamp,
+              ...   title text,
+              ...   PRIMARY KEY ((tag), video_id)
+              ... );
+
+** Lecture 4: Clustering Columns
+Partition key takes care of grouping data for a certain column into the same file, on the same disk, on the same node.
+But this also gives a really thin piece of uniqueness to this data.
+One column might not be enough.
+If we want to control some order and uniqueness in our data model.
+The primary key ensures uniqueness so we add the extra columns as clustering columns in the primary key.
+That is, we can have multiple clustering/sorting keys in the primary key.
+Clustering columns are always the next columns after the partition key.
+It only matters as to how much order and uniqueness we want in our data model.
+
+The data is stored in ascending order(by default) in the database itself which is pre-optimized and makes it super fast.
+
+The uniqueness, if compromised with, will cause Cassandra to start overwriting records.
+There is no incremental value possible in cassandra for certain ID-like columns that we have for new entries being put in RDBMS databases.
+
+CQL does allow you to order data in the select statement using 'order by' and it is optimized.
+
+Below,
+PRIMARY KEY((state), city, name, id)
+
+state is a partition key because it is the first element inside the PRIMARY KEY parantheses.
+There can be multiple partition keys in which case the parantheses around `state` become required.
+For a single partition key, those parantheses can be removed.
+So,
+PRIMARY KEY(state, city, name, id) is the same.
+
+*** Querying Clustering Columns
+1. Every query needs to have a partition key to be able to find that data in your cluster.
+2. Clustering columns can follow thereafter
+3. You can do either equality(=) or range queries(>, <) on clustering columns.
+4. Any inequality query is legal only inside a partition.
+5. The order of the clustering columns is also important. If you are doing a select to find a certain records using equality for clustering columns, that has to be done in the order in which those clustering columns are specified in the PRIMARY KEY.
+6. All equality comparisons must come before inequality comparisons
+7. Since data is sorted on disk, range searches are a binary search followed by a linear read. This is awesome.
+
+*** Changing Default Ordering
+1. Clustering columns default ascending order
+2. Change ordering direction via WITH CLUSTERING ORDER BY
+3. Must include all columns including and up to the columns you wish to order descending
+   Eg, we exclude id below and assume ASC
+
+   CREATE TABLE users (
+    state text,
+    city text,
+    name text,
+    id uuid,
+    PRIMARY KEY((state), city, name, id))
+   WITH CLUSTERING ORDER BY(city DESC, name ASC);
+
+*** Allow Filtering
+1. ALLOW FILTERING relaxes the querying on the partition key constraint
+2. You can then query on just clustering columns
+3. Causes Cassandra to scan all partitions in the table
+4. Don't use it-
+   a. Unless you really have to
+   b. Best on small data sets
+   c. But still, don't use it seriously
+
+*** Exercises
+ CREATE TABLE videos_by_tag (
+ tag text,
+ video_id uuid,
+ added_date timestamp,
+ title text,
+ PRIMARY KEY (tag, added_date))
+ WITH CLUSTERING ORDER BY(added_date DESC);
+
+ Doing a `SELECT * FROM videos_by_tag` -
+ NOTE: Notice the rows are still grouped by their partition key value but ordered in descending order of added date.
+
+ Unless doing a full table scan as in the query above(bad practice),
+ you always need to pass a partition key.
+
+ Query to retrieve videos made in 2013 or later,
+ select * from videos_by_tag where tag='cassandra' and added_date>'2013-01-01';
+
+** Lecture 5: Application Connectivity
+We need drivers to connect our application to the Cassandra DB.
+There are drivers available in many languages.
+
+We first create a Cluster object and then we use that object to obtain a session.
+Session manages connection to the cluster.
+We then use that session to interact with our database and issue commands.
+
+from cassandra.cluster import Cluster
+cluster = Cluster(protocol_version = 3)
+session = cluster.connect('killrvideo')
+records=session.execute("SELECT * from videos_by_tag")
+print(records[0]) -> to get first ROW
+print(records[1]) -> to get second ROW
+
+** Lecture 6: Nodes
+A single node runs on a server or a VM and it runs a Java Virtual Machine(or JVM).
+The JVM is running Apache Cassandra. Apache Cassandra is written in Java.
+The node could be running the cloud or on an on-premise data center.
+Local storage or direct attached storage is recommended.
+As a rule of thumb, if your disk has an ethernet cable, then it is a wrong choice for cassandra setup.
+
+The node is responsible for the data that it stores. All the data stored there is in a distributed hash table.
+A node can handle 6000-12000 transactions/second/core.
+2-4 TB on SSD or rotational disk can be stored.
+
+SSDs are extremely fast, and good to have on nodes running Cassandra.
+
+The tool to manage these nodes is called `nodetool`.
+*** nodetool
+1. It has commands specific to a certain node.
+2. It has commands that operate on the whole cluster.
+
+For example,
+nodetool info
+gives information about the running node by itself, such as jvm statistics
+
+nodetool status
+gives information not just about that single node but all the nodes in the cluster.
+Gives the state of how the current node sees all the other nodes in the cluster.
+
+*** Dsetool status and nodetool status.
+Although both tools have a status command, dsetool works with DataStax Enterprise as a whole (Apache Cassandra, Apache Solr, Graph)
+whereas nodetool is specific to Apache Cassandra. Their functionality diverges from here.
+
+** Lecture 7: Ring
+The node a certain piece of data gets placed into is the "Coordinator node" for that case.
+The job of the coordinator node is to send the data to the node that stores that partition.
+
+Each node is responsible for a range of data called a token range. Knowing what range of data each node owns, the coordinator can send the data to the correct node.
+That is,
+the coordinator gets the data from the client, then send the data to the correct node, then send an acknowledgement back to the client.
+
+Amount of Data that can be stored on the cluster
+The range of data goes from -2^63 to 2^63-1
+
+The partitioner determines how you are going to distribute your data across the ring.
+If this gets messed up, you'll get 'hot spots' in your cluster because of data getting distributed unevenly causing those nodes to be overloaded.
+
+Joining a cluster
+The cluster stays up and running while a new node joins.
+Nodes join the cluster by communicating with any node.
+It gossips out to the seed nodes to say I'm new here.
+The other nodes calculates where it fits in the ring, this can be manual or automatic.
+After that, the other nodes stream their data down to the new node.
+
+The list of seed nodes is available in cassandra.yaml from where Apache Cassandra detects it.
+Seed nodes communicate cluster topology to the joining node.
+Once the new node joins the cluster, all nodes are peers.
+
+Four states of a node in a cluster-
+Joining
+Leaving
+Up
+Down
+
+Drivers -
+1. Drivers intelligently choose which node would best coordinate a request
+2. per query basis
+3. TokenAwarePolicy - driver chooses node which contains the data
+4. RoundRobinPolicy - driver round robins the ring
+5. DCAwareRoundRobinPolicy - driver round robins the target data center
+
+Drivers gets an understanding of the token ranges that belong to each node and which replicas and will store that information locally.
+
+Why it is important to know for the client about token ranges?
+The driver is aware about the token ranges. So, when data comes into the driver, the driver knows that this token owns this token range, so I'm going to send the data directly to the node. This eliminates the need to involve the coordinator. This makes the system more efficient.
+
+** Lecture 8: P2P
+P2P stands for Peer to Peer.
+We have replicas of data in our cluster and those replicas are all equals in this peer to peer setup.
+No one is a leader nor a follower.
+The coordinator takes the data from the client and writes the data asynchronously to each replica node responsible for that data.
+
+In case of a split within the cluster such that some nodes are invisible to other nodes,
+Cassandra handles this situation automatically.
+This is not a failover event. Each node that can still be seen by the client is still online.
+As long as you can write to a replica, you're still up and running.
+This is configurable as well. You can dial this up so you are intolerant of the situation or dial it down so you are totally tolerant.
+When data is written to the coordinator on one side of the split, it will write that data to the replica/replicas that it can see.
+How many replicas it gets written to is controlled by the consistency level.
+
+** Lecture 9: Vnodes
+It stands for Virtual nodes.
+Upon addition/removal of nodes in the cluster, there happens an imbalance in the spread of tokens across the nodes.
+In the case of a node addition, nodes with existing data to stream the data into new nodes.
+In a regular token range assignment, a good partitioner will partition token assignments evenly across the cluster.
+
+The node with more tokens streams the pertinent replicas to the new node, this puts strain on the sending node.
+Cassandra's vnode feature helps mitigate this problem by having each physical node act more like several smaller virtual nodes.
+
+Case of addition of a node into a cluster with 3 existing nodes.
+With vnode, each node is responsible for several slices of the ring instead of just one large slice.
+With a consistent hash, all the 3 nodes have roughly the same amount of data.
+Instead of the new node simply taking over one node's entire token range, the new node takes over several smaller ranges from each of the other nodes.
+So, part of the data from all the nodes are streamed to the new node.
+This makes bootstrapping a new node into the cluster take much less time and it takes the burden of streaming off of any single node.
+
+Vnodes help keep the cluster balanced as new nodes are introduced to it and old nodes are decommissoned.
+The default value for the number of vnodes is 128.
+This means that each node has 128 vnodes.
+Vnodes automate token range assignment instead of the administrator to manually distribute the ranges.
+
+The number of vnodes can be configured by changing the num_tokens value in cassandra.yaml.
+As long as this value is greater than 1, you're using vnodes.
+
+** Lecture 10: Gossip
+This is how the cluster distributes information between the nodes.
+Gossip is a broadcast protocol for disseminating data.
+No centralized server holds the cluster information, but instead the peers distribute this information amongst themselves, maintaining only the latest information.
+The information spreads out in a polynomial fashion.
+A node can gossip with as many nodes as we like during each round.
+Nodes pick nodes to gossip with based on some criteria.
+
+*** Choosing a gossip node
+1. Each node initiates a gossip round every second
+2. Picks one to three nodes to gossip with
+3. Nodes can gossip with ANY node in the cluster
+4. Probabilistically(slight favour) seed and downed nodes
+5. Nodes do not track which nodes they gossiped with prior
+6. Reliability and efficiently spread node metadata through the cluster
+7. Fault tolerant -- continues to spread when nodes fail
+
+   Think of seed nodes as the annoying nosy neighbour who seems to know everyone's business before they do, kind of.
+
+*** What to Gossip? - cluster metadata
+Gossip spreads only node metadata, not client data.
+All the nodes are similar.
+
+Each node has an overarching data structure called an endpoint state.
+This essentially stores all the gossip state information for a single node or endpoint.
+
+The endpoint state nests another data structure called the heartbeat state.
+The heartbeat state tracks two values.
+The first is the generation, which is a timestamp of when the node bootstrapped.
+The second is the version, which is a simple integer. Each node increments its value every second.
+Heartbeat values increment then spreading throughout the cluster, allowing nodes to make assumptions as to whether another node is up or not.
+
+Endpoint states nest a second data structure called the application state.
+The application state stores the metadata for this node.
+The application state is the data about the node that gossip spreads throughout the cluster.
+One piece of metadata, which is part of the application state is the status.
+Status can have one of several values.
+Bootstrap means the node is coming online.
+Normal means everything is functioning normally.
+Leaving or left means a node is being decommissioned.
+Removing or remove is when you're removing a node that you can't physically access.
+Nodes declare their own status.
+Although each node's failure detector will determine if a peer appears to be up or down.
+Nodes do not gossip these assumptions about their peers.
+DC represents a node's data center while rack is the node's rack.
+The schema number changes as any schemas mutate over time.
+LOAD is the disk space usage.
+
+For a single node,
+Endpoint state
+1. Heartbeat state:
+   generation=5
+   version=22
+2. Application state
+   STATUS=NORMAL
+   DC=west
+   rack=rack1
+   SCHEMA=c2a2b...
+   LOAD=100.0
+   SEVERITY=0.75
+
+Gossip is a simple messaging protocol.
+Each node has endpoints state of all the other nodes including itself.
+EP is short for Endpoint, indicating the IP address of the node that this endpoint state data belongs to.
+HB is heartbeat state, the first number being the generation and the second number being the version or the heartbeat number.
+Each endpoint state stores several different values in its application state.
+Here, there is just one shown: LOAD.
+
+EP:127.0.0.2
+HB:175:40
+LOAD:68
+
+Note that any of these endpoints could be for the current node, but that doesn't matter to gossip.
+
+*** Network traffic
+Constant rate(trickle) of network traffic
+Minimal compared to data streaming, hints
+Doesn't cause network spikes
+
+Think of gossip traffic as a quiet hum in the background.
+
+** Lecture 11: Snitch
+Determines/declares a node's rack and data center
+The "topology" of the cluster, ie, which nodes belong where
+Several different types of snitches
+Configured in cassandra.yaml
+
+endpoint_snitch: SimpleSnitch
+
+The most popular snitch is the GossipingPropertyFileSnitch.
+
+*** SimpleSnitch
+Places all nodes on datacenter one on rack one.
+Default snitch.
+
+Racks and data centers are logical node assignments which you will usually want to match to your real physical setup.
+
+*** Property File Snitch
+Instead of having its values hardcoded like SimpleSnitch, the property file snitch retrieves its data center and rack assignments from a local configuration file called cassandra-topology.properties file.
+
+You must maintain this file on each node.
+You must keep files in sync with all nodes in the cluster.
+
+*** Gossiping Property File Snitch
+Best of both worlds
+Relieves the pain of property file snitch
+Declare the current node's DC/rack information in a file
+You must set each individual node's settings
+But you don't have to copy settings as with property file snitch
+Gossip spreads the settings through the cluster
+You don't have to keep these files in sync across the cluster
+cassandra-rackdc.properties file
+
+dc=DC1
+rack=RAC1
+
+How you name your datacenters and rack is up to you.
+
+*** Rack Inferring Snitch
+Infers the rack and the DC from the IP address.
+So, for the IP 110.100.200.105,
+100 = data center octet
+200 = rack octet
+105 = node octet
+
+Unless your IP addresses are clean enough to match the physical setup of your hardware, don't use this rack inferring snitch.
+
+*** Cloud Based snitches
+Ec2Snitch
+Ec2MultiRegionSnitch
+
+*** Dynamic snitches
+Layered on top of your actual snitch
+Monitors cluster health and performance
+Determines which node to query replicas from depending on node health, thus preventing load sluggish nodes
+Turned on by default for all snitches
+
+Dyanamic snitch comes for free and acts as a wrapper around the snitch you configure in your cassandra.yaml file.
+
+*** Configuring snitches
+Be sure all the nodes in your cluster use the same snitch, otherwise your cluster will quickly get into an inconsistent state.
+Changing cluster topology network requires restarting all nodes.
+Run sequential repair and cleanup on each node.
+
+** Lecture 12: Replication
+If a node owning a certain number of tokens was lost, you would lose your data. Hence replication is needed.
+Q. How does a cassandra ring replicate data across its nodes?
+
+*** RF = 1
+No replication is RF=1.
+RF stands for Replication Factors.
+An RF of 1 means only one copy of your data.
+
+The data from the client gets to any node in the cluster, since all the nodes are the same.
+For that data write, that node is called the coordinator node.
+The data with a partition key that has been hashed comes to this coordinator node, and this node will know that it doesn't belong to this node but to a node that handles a certain token range.
+The coordinator is smart enough to know the placement of data around the ring. This is where the snitch comes in.
+That coordinator then asynchronously copies it to the correct place.
+
+This is how you can write to any node in the cluster.
+
+*** RF = 2
+Each node now is not only storing its own data, but its neightbours' data.
+So we have two copies of data in the cluster.
+So now if a failure occurs, we have reduced the possibility of losing all the data in a certain partition hash range.
+Again, the coordinator node is smart enough to know the layout of the cluster.
+This data will be asynchronously copied to the correct nodes.
+This keeps the data consistent throughout the ring.
+
+How do you decide how much data should we replicate and what should be the replication factor?
+Answer is 3.
+3 is a good number because it gives you a balance of how much data you're copying, meaning the cost and also just taking the advantage of the probability of failure inside a cassandra ring.
+The chances of 3 servers failing at the same time is really low.
